@@ -1,15 +1,21 @@
-pandas
+# pandas
+# numpy
+# matplotlib
+# seaborn
+# missingno
+# plotly
+# wordcloud
+# scikit-learn
+# xgboost
+# catboost
+# lightgbm
+# hyperopt
+# bayesian-optimization
+# ipywidgets
+# ipython
+flasgger
+flask
+flask-cors
 numpy
-matplotlib
-seaborn
-missingno
-plotly
-wordcloud
-scikit-learn
-xgboost
-catboost
-lightgbm
-hyperopt
-bayesian-optimization
-ipywidgets
-ipython
+pandas
+joblib
