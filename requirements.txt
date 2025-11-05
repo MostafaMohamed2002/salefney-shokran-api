@@ -13,9 +13,10 @@
 # bayesian-optimization
 # ipywidgets
 # ipython
-flasgger
 flask
+flasgger
 flask-cors
-numpy
 pandas
+numpy
 joblib
+xgboost
