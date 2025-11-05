@@ -281,4 +281,7 @@ def predict():
 def home():
     return redirect(url_for('flasgger.apidocs'))
 
+# ============ Run App ============
+if __name__ == '__main__':
+    app.run(debug=False)
 
