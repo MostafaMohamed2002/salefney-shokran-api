@@ -1,0 +1,15 @@
+pandas
+numpy
+matplotlib
+seaborn
+missingno
+plotly
+wordcloud
+scikit-learn
+xgboost
+catboost
+lightgbm
+hyperopt
+bayesian-optimization
+ipywidgets
+ipython
