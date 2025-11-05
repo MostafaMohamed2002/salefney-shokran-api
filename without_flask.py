@@ -46,8 +46,8 @@ warnings.filterwarnings("ignore")
 """## <div style="border-radius:0px; border:#3eb489 solid; padding: 15px; background-color: #ddefdd; font-size:100%; text-align:center">2. Read and Explain Dataset</div>"""
 
 #Read data
-data_original =  pd.read_csv("C:\\Users\\Mosta\\OneDrive\\Documents\\eslam\\credit_risk_dataset.csv")
-data = pd.read_csv("C:\\Users\\Mosta\\OneDrive\\Documents\\eslam\\credit_risk_dataset.csv")
+data_original =  pd.read_csv("/workspaces/eslam/credit_risk_dataset.csv")
+data = pd.read_csv("/workspaces/eslam/credit_risk_dataset.csv")
 
 data
 
@@ -969,7 +969,9 @@ def _ensure_fitted_model():
 
     m = XGBClassifier(**params)
     m.fit(X_tr, y_tr)
-    joblib.dump(m, '/content/models/xgb_model.pkl')
+    joblib.dump({
+    "model": m,
+    "feature_names": list(X_tr.columns)}, "models/xgb_model.pkl")
     globals()['xgb_final'] = m
     return m, 'xgb_final', True  # اتدرّب دلوقتي
 
