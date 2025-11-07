@@ -10,8 +10,10 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from datetime import datetime, timedelta
-import firebase_admin
-from firebase_admin import credentials, firestore, auth
+import json
+from pymongo import MongoClient
+from bson import ObjectId
+from bson.errors import InvalidId
 
 # ============ Logging Setup ============
 # Create logs directory if it doesn't exist
@@ -56,16 +58,76 @@ logger.addHandler(console_handler)
 # ============ Flask Setup ============
 app = Flask(__name__)
 CORS(app)
-swagger = Swagger(app)
 
-# Firebase Configuration
-if not firebase_admin._apps:
-    # Initialize Firebase Admin SDK
-    cred = credentials.Certificate("salefney-shokran-firebase-adminsdk-fbsvc-2413740965.json")  # Make sure to place your service account key file
-    firebase_admin.initialize_app(cred)
+# Swagger Configuration
+swagger_config = {
+    "headers": [],
+    "specs": [
+        {
+            "endpoint": 'apispec',
+            "route": '/apispec.json',
+            "rule_filter": lambda rule: True,  # all in
+            "model_filter": lambda tag: True,  # all in
+        }
+    ],
+    "static_url_path": "/flasgger_static",
+    "swagger_ui": True,
+    "specs_route": "/docs"
+}
 
-db = firestore.client()
-app.config['SECRET_KEY'] = 'your-secret-key'  # Change this to a secure secret key
+swagger_template = {
+    "swagger": "2.0",
+    "info": {
+        "title": "Salefney Shokran API",
+        "description": "API for loan risk prediction and user management",
+        "version": "1.0.0",
+        "contact": {
+            "name": "API Support",
+            "url": "https://github.com/MostafaMohamed2002/salefney-shokran-api"
+        }
+    },
+    "securityDefinitions": {
+        "Bearer": {
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header",
+            "description": "Enter your bearer token in the format: Bearer <token>"
+        }
+    }
+}
+
+swagger = Swagger(app, config=swagger_config, template=swagger_template)
+
+# MongoDB Configuration
+def initialize_mongodb():
+    """Initialize MongoDB connection with proper error handling"""
+    try:
+        # Get MongoDB connection string from environment variable or use local default
+        mongo_uri = os.environ.get('MONGODB_URI', 'mongodb+srv://mostafa0mohamed2002_db_user:eCX0zjDYiphHo3JO@cluster0.prqdjp2.mongodb.net/?appName=Cluster0')
+        
+        # Initialize MongoDB client
+        client = MongoClient(mongo_uri)
+        
+        # Test the connection
+        client.admin.command('ping')
+        logger.info("MongoDB connection successful")
+        
+        # Get database (use environment variable or default)
+        db_name = os.environ.get('MONGODB_DB_NAME', 'salefney_shokran')
+        db = client[db_name]
+        
+        logger.info(f"Connected to MongoDB database: {db_name}")
+        return db
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize MongoDB: {str(e)}", exc_info=True)
+        raise Exception(f"MongoDB connection failed: {str(e)}")
+
+# Initialize MongoDB
+db = initialize_mongodb()
+
+# Use environment variable for secret key with a secure random fallback
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', os.urandom(24).hex())
 
 # ============ Load Model ============
 MODEL_PATH = "models/xgb_model.pkl"
@@ -164,12 +226,14 @@ def predict_score(m, X):
 # ============ API Endpoints ============
 @app.route('/predict', methods=['POST'])
 def predict():
-    logger.info('Received prediction request')
     """
     Make a prediction and save it to database
     ---
     tags:
       - Prediction
+    security:
+      - Bearer: []
+    summary: Make a new loan risk prediction
     parameters:
       - name: Authorization
         in: header
@@ -353,7 +417,7 @@ def predict():
             token = auth_header.split(' ')[1]
             # Verify JWT token
             payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            prediction_result['user_id'] = payload['uid']
+            prediction_result['user_id'] = payload.get('user_id')
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "Token has expired. Please login again."}), 401
         except jwt.InvalidTokenError:
@@ -364,25 +428,31 @@ def predict():
             pass
 
     try:
-        # Save prediction to Firestore
-        logger.info('Saving prediction to Firestore')
-        db.collection('predictions').add(prediction_result)
-        logger.info('Prediction saved successfully')
+        # Save prediction to MongoDB
+        logger.info('Saving prediction to MongoDB')
+        predictions_collection = db.predictions
+        result = predictions_collection.insert_one(prediction_result)
+        prediction_result['_id'] = str(result.inserted_id)
+        logger.info(f'Prediction saved successfully with ID: {result.inserted_id}')
 
-        # Return prediction response
-        return jsonify(prediction_result)
+        # Return prediction response (remove MongoDB ObjectId for JSON serialization)
+        response_data = {k: v for k, v in prediction_result.items() if k != '_id'}
+        response_data['id'] = str(result.inserted_id)
+        return jsonify(response_data)
     except Exception as e:
         logger.error(f'Error saving prediction: {str(e)}', exc_info=True)
         return jsonify({"error": "Failed to save prediction", "detail": str(e)}), 500
 
 @app.route('/predictions', methods=['GET'])
 def get_predictions():
-    logger.info('Received request to get predictions')
     """
     Get prediction history
     ---
     tags:
       - Prediction History
+    security:
+      - Bearer: []
+    summary: Retrieve prediction history
     parameters:
       - name: Authorization
         in: header
@@ -483,27 +553,27 @@ def get_predictions():
             logger.info('Verifying JWT token')
             # Verify JWT token
             payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            user_id = payload['uid']
+            user_id = payload.get('user_id')
             logger.info(f'Successfully authenticated user: {payload.get("email")}')
             
-            # Query Firestore for user's predictions
+            # Query MongoDB for user's predictions
             try:
-                predictions_ref = db.collection('predictions')
-                # First, get documents filtered by user_id
-                query = predictions_ref.where('user_id', '==', user_id)
-                docs = query.get()
+                predictions_collection = db.predictions
+                # Get documents filtered by user_id and sort by timestamp
+                cursor = predictions_collection.find({'user_id': user_id}).sort('timestamp', -1).limit(limit)
                 
-                # Convert to list and sort in memory
-                predictions = [doc.to_dict() for doc in docs]
-                predictions.sort(key=lambda x: x.get('timestamp', datetime.min), reverse=True)
-                
-                # Apply limit after sorting
-                predictions = predictions[:limit]
+                # Convert to list and handle ObjectId serialization
+                predictions = []
+                for doc in cursor:
+                    # Convert ObjectId to string for JSON serialization
+                    doc['id'] = str(doc['_id'])
+                    del doc['_id']
+                    predictions.append(doc)
                 
                 logger.info(f'Successfully retrieved {len(predictions)} predictions for user')
                 
             except Exception as e:
-                logger.error(f'Firestore query error: {str(e)}', exc_info=True)
+                logger.error(f'MongoDB query error: {str(e)}', exc_info=True)
                 return jsonify({
                     "error": "Failed to retrieve predictions",
                     "detail": str(e),
@@ -530,21 +600,22 @@ def get_predictions():
     else:
         # Get all predictions
         try:
-            predictions_ref = db.collection('predictions')
-            # Get all documents
-            docs = predictions_ref.get()
+            predictions_collection = db.predictions
+            # Get all documents sorted by timestamp
+            cursor = predictions_collection.find().sort('timestamp', -1).limit(limit)
             
-            # Convert to list and sort in memory
-            predictions = [doc.to_dict() for doc in docs]
-            predictions.sort(key=lambda x: x.get('timestamp', datetime.min), reverse=True)
-            
-            # Apply limit after sorting
-            predictions = predictions[:limit]
+            # Convert to list and handle ObjectId serialization
+            predictions = []
+            for doc in cursor:
+                # Convert ObjectId to string for JSON serialization
+                doc['id'] = str(doc['_id'])
+                del doc['_id']
+                predictions.append(doc)
             
             logger.info(f'Successfully retrieved {len(predictions)} predictions')
             
         except Exception as e:
-            logger.error(f'Firestore query error: {str(e)}', exc_info=True)
+            logger.error(f'MongoDB query error: {str(e)}', exc_info=True)
             return jsonify({
                 "error": "Failed to retrieve predictions",
                 "detail": str(e),
@@ -556,12 +627,12 @@ def get_predictions():
 # ============ User Authentication Endpoints ============
 @app.route('/register', methods=['POST'])
 def register():
-    logger.info('Received registration request')
     """
     Register a new user
     ---
     tags:
       - Authentication
+    summary: Register new user account
     parameters:
       - name: body
         in: body
@@ -611,46 +682,53 @@ def register():
         return jsonify({'error': 'Missing required fields'}), 400
 
     try:
-        # Check if username exists in Firestore
-        users_ref = db.collection('users')
-        username_query = users_ref.where('username', '==', data['username']).limit(1).get()
-        if len(list(username_query)) > 0:
+        # Check if email already exists in MongoDB
+        users_collection = db.users
+        existing_email = users_collection.find_one({'email': data['email']})
+        if existing_email:
+            logger.warning(f'Registration failed: Email {data["email"]} already exists')
+            return jsonify({'error': 'Email already exists'}), 400
+
+        # Check if username already exists in MongoDB
+        existing_username = users_collection.find_one({'username': data['username']})
+        if existing_username:
             logger.warning(f'Registration failed: Username {data["username"]} already exists')
             return jsonify({'error': 'Username already exists'}), 400
 
-        # Create user in Firebase Auth with email verification enabled
-        user_record = auth.create_user(
-            email=data['email'],
-            password=data['password'],
-            email_verified=False,  # User will need to verify their email
-            display_name=data['username']  # Set display name to username
-        )
+        # Hash the password for secure storage
+        hashed_password = generate_password_hash(data['password'])
 
-        # Store additional user data in Firestore
+        # Create user document for MongoDB
         user_data = {
             'email': data['email'],
             'username': data['username'],
+            'password': hashed_password,
             'created_at': datetime.utcnow(),
-            'uid': user_record.uid
+            'email_verified': False
         }
 
-        # Save user data to Firestore
-        db.collection('users').document(user_record.uid).set(user_data)
+        # Insert user into MongoDB
+        result = users_collection.insert_one(user_data)
+        user_id = str(result.inserted_id)
         
-        return jsonify({'message': 'User registered successfully'}), 201
-    except auth.EmailAlreadyExistsError:
-        return jsonify({'error': 'Email already exists'}), 400
+        logger.info(f'User registered successfully with ID: {user_id}')
+        return jsonify({
+            'message': 'User registered successfully',
+            'user_id': user_id
+        }), 201
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 400
+        logger.error(f'Registration error: {str(e)}', exc_info=True)
+        return jsonify({'error': 'Registration failed'}), 500
 
 @app.route('/login', methods=['POST'])
 def login():
-    logger.info('Received login request')
     """
     User login
     ---
     tags:
       - Authentication
+    summary: Login to get access token
     parameters:
       - name: body
         in: body
@@ -712,39 +790,66 @@ def login():
         return jsonify({'error': 'Missing email or password'}), 400
 
     try:
-        # Get user by email
+        # Get user by email from MongoDB
         try:
-            user = auth.get_user_by_email(data['email'])
-            logger.info(f'User found: {data["email"]}')
-        except auth.UserNotFoundError:
-            logger.warning(f'Login failed: Invalid credentials for email {data["email"]}')
-            return jsonify({'error': 'Invalid email or password'}), 401
+            users_collection = db.users
+            user = users_collection.find_one({'email': data['email']})
+            
+            if not user:
+                logger.warning(f'Login failed: Invalid credentials for email {data["email"]}')
+                return jsonify({
+                    'error': 'Invalid email or password',
+                    'code': 'INVALID_CREDENTIALS'
+                }), 401
+                
+            # Verify password
+            if not check_password_hash(user['password'], data['password']):
+                logger.warning(f'Login failed: Invalid password for email {data["email"]}')
+                return jsonify({
+                    'error': 'Invalid email or password',
+                    'code': 'INVALID_CREDENTIALS'
+                }), 401
+            
+            logger.info(f'User found and password verified: {data["email"]}')
+            
+        except Exception as e:
+            logger.error(f'Database error during login: {str(e)}', exc_info=True)
+            return jsonify({
+                'error': 'Database service error',
+                'code': 'DB_SERVICE_ERROR'
+            }), 500
 
-        # Get additional user data from Firestore
-        user_doc = db.collection('users').document(user.uid).get()
-        if not user_doc.exists:
-            return jsonify({'error': 'User data not found'}), 404
-
-        user_data = user_doc.to_dict()
-
-        # Create a JWT token with user information
-        token = jwt.encode({
-            'uid': user.uid,
-            'email': user.email,
-            'username': user_data.get('username'),
-            'exp': datetime.utcnow() + timedelta(days=1)  # Token expires in 1 day
-        }, app.config['SECRET_KEY'], algorithm='HS256')
-
-        return jsonify({
-            'token': token,
-            'username': user_data.get('username'),
-            'email': user.email,
-            'uid': user.uid
-        }), 200
-
-    except auth.UserNotFoundError:
-        return jsonify({'error': 'Invalid email or password'}), 401
+        # Create JWT token
+        try:
+            token_payload = {
+                'user_id': str(user['_id']),
+                'email': user['email'],
+                'username': user.get('username'),
+                'exp': datetime.utcnow() + timedelta(days=1)  # Token expires in 1 day
+            }
+            token = jwt.encode(token_payload, app.config['SECRET_KEY'], algorithm='HS256')
+            logger.info(f'JWT token created successfully for user: {user["_id"]}')
+            
+            return jsonify({
+                'token': token,
+                'username': user.get('username'),
+                'email': user['email'],
+                'user_id': str(user['_id'])
+            }), 200
+            
+        except Exception as e:
+            logger.error(f'JWT token creation error: {str(e)}', exc_info=True)
+            return jsonify({
+                'error': 'Token creation failed',
+                'code': 'TOKEN_CREATE_ERROR'
+            }), 500
+            
     except Exception as e:
+        logger.error(f'Unexpected error during login: {str(e)}', exc_info=True)
+        return jsonify({
+            'error': 'An unexpected error occurred',
+            'code': 'UNKNOWN_ERROR'
+        }), 500
         return jsonify({'error': str(e)}), 401
 
     return jsonify({
@@ -758,6 +863,16 @@ def login():
 # ============ Redirect Root to Swagger ============
 @app.route('/')
 def home():
+    """
+    API Documentation
+    ---
+    tags:
+      - Documentation
+    summary: Redirect to API documentation
+    responses:
+      302:
+        description: Redirect to Swagger UI documentation
+    """
     return redirect(url_for('flasgger.apidocs'))
 # ============ Error Handlers ============
 @app.errorhandler(Exception)
